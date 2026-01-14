@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en-us">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    <title>WebRayz - Custom WASM Shell</title>
+    <style>
+        body { 
+            margin: 0; 
+            background-color: #1a1a1a; 
+            color: #f0f0f0;
+            font-family: sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+        }
+        canvas.emscripten { 
+            border: 2px solid #333; 
+            background-color: #000;
+            display: block;
+        }
+        .controls {
+            margin-top: 10px;
+        }
+    </style>
+  </head>
+  <body>
+    <h1>My Custom Raylib Game</h1>
+    
+    <canvas class="emscripten" id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+    
+    <div class="controls">
+        <p>Powered by Zig + Raylib</p>
+    </div>
+
+    <script type='text/javascript'>
+      var Module = {
+        print: (function() {
+          return function(text) {
+            console.log(text);
+          };
+        })(),
+        printErr: function(text) {
+          console.error(text);
+        },
+        canvas: (function() {
+          var canvas = document.getElementById('canvas');
+          return canvas;
+        })()
+      };
+    </script>
+    {{{ SCRIPT }}}
+  </body>
+</html>
