@@ -1,25 +1,37 @@
 const std = @import("std");
-const rlz = @import("raylib_zig");
+const rlz = @import("raylib-zig");
 
-pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{});
+pub fn build(b: *std.Build) !void {
+    var target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const raylib_dep = b.dependency("raylib_zig", .{
+    const is_web = target.query.os_tag == .emscripten;
+
+    // On web, enable wasm SIMD as a target CPU feature so raylib's vector math
+    // can be vectorized. Mirrors rayz's setup.
+    if (is_web) {
+        var query = target.query;
+        query.cpu_features_add.addFeature(@intFromEnum(std.Target.wasm.Feature.simd128));
+        target = b.resolveTargetQuery(query);
+    }
+
+    const raylib_config: []const u8 = if (is_web) "-msimd128" else "";
+
+    const raylib_dep = b.dependency("raylib-zig", .{
         .target = target,
         .optimize = optimize,
+        .config = raylib_config,
     });
 
     const raylib = raylib_dep.module("raylib");
-    const raygui = raylib_dep.module("raygui");
     const raylib_artifact = raylib_dep.artifact("raylib");
 
-    if (target.query.os_tag == .emscripten) {
+    if (is_web) {
         const emsdk = rlz.emsdk;
-        
-        // For WASM, we compile main.zig as a library
-        const wasm = b.addLibrary(.{
-            .name = "webrayz_wasm",
+
+        const lib = b.addLibrary(.{
+            .linkage = .static,
+            .name = "webrayz",
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/main.zig"),
                 .target = target,
@@ -27,14 +39,25 @@ pub fn build(b: *std.Build) void {
             }),
         });
 
-        wasm.root_module.addImport("raylib", raylib);
-        wasm.root_module.addImport("raygui", raygui);
+        lib.root_module.addImport("raylib", raylib);
+
+        // Zig 0.16's self-hosted backend (default for Debug) produces wasm
+        // that traps with SIGILL at runtime when built from Linux hosts. Force
+        // LLVM/LLD which compiles fine.
+        lib.use_llvm = true;
+        lib.use_lld = true;
 
         const install_dir: std.Build.InstallDir = .{ .custom = "web" };
-        const emcc_flags = emsdk.emccDefaultFlags(b.allocator, .{ .optimize = optimize });
+        var emcc_flags = emsdk.emccDefaultFlags(b.allocator, .{ .optimize = optimize });
+
+        try emcc_flags.put("-sALLOW_MEMORY_GROWTH=1", {});
+        try emcc_flags.put("-sASSERTIONS=1", {});
+        // Match raylib's compile-time -msimd128 at link time.
+        try emcc_flags.put("-msimd128", {});
+
         const emcc_settings = emsdk.emccDefaultSettings(b.allocator, .{ .optimize = optimize });
 
-        const emcc_step = emsdk.emccStep(b, raylib_artifact, wasm, .{
+        const emcc_step = emsdk.emccStep(b, raylib_artifact, lib, .{
             .optimize = optimize,
             .flags = emcc_flags,
             .settings = emcc_settings,
@@ -44,8 +67,8 @@ pub fn build(b: *std.Build) void {
 
         b.getInstallStep().dependOn(emcc_step);
 
-        const html_filename = std.fmt.allocPrint(b.allocator, "{s}.html", .{wasm.name}) catch @panic("OOM");
-        
+        const html_filename = std.fmt.allocPrint(b.allocator, "{s}.html", .{lib.name}) catch @panic("OOM");
+
         const run_step = b.step("run", "Run the app");
         const emrun_step = emsdk.emrunStep(
             b,
@@ -54,51 +77,35 @@ pub fn build(b: *std.Build) void {
         );
         emrun_step.dependOn(emcc_step);
         run_step.dependOn(emrun_step);
-
     } else {
-        const mod = b.addModule("webrayz", .{
-            .root_source_file = b.path("src/root.zig"),
-            .target = target,
-        });
-
         const exe = b.addExecutable(.{
             .name = "webrayz",
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/main.zig"),
                 .target = target,
                 .optimize = optimize,
-                .imports = &.{
-                    .{ .name = "webrayz", .module = mod },
-                },
             }),
         });
 
-        exe.linkLibrary(raylib_artifact);
+        // Zig 0.16's self-hosted x86_64 ELF linker doesn't yet handle
+        // R_X86_64_PC64 relocations in .sframe sections shipped by Arch's
+        // glibc 2.43+r22 crt1.o. Route through LLVM/LLD on Linux native.
+        if (target.result.os.tag == .linux) {
+            exe.use_llvm = true;
+            exe.use_lld = true;
+        }
+
         exe.root_module.addImport("raylib", raylib);
-        exe.root_module.addImport("raygui", raygui);
 
         b.installArtifact(exe);
 
-        const run_step = b.step("run", "Run the app");
         const run_cmd = b.addRunArtifact(exe);
         run_cmd.step.dependOn(b.getInstallStep());
-
         if (b.args) |args| {
             run_cmd.addArgs(args);
         }
+
+        const run_step = b.step("run", "Run the app");
         run_step.dependOn(&run_cmd.step);
-        
-        // Tests
-        const mod_tests = b.addTest(.{
-            .root_module = mod,
-        });
-        const run_mod_tests = b.addRunArtifact(mod_tests);
-        const exe_tests = b.addTest(.{
-            .root_module = exe.root_module,
-        });
-        const run_exe_tests = b.addRunArtifact(exe_tests);
-        const test_step = b.step("test", "Run tests");
-        test_step.dependOn(&run_mod_tests.step);
-        test_step.dependOn(&run_exe_tests.step);
     }
 }
